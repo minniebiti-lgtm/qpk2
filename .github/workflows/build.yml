@@ -1,0 +1,606 @@
+name: Build QPK APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Generate project
+        run: |
+          set -e
+          mkdir -p proj && cd proj
+          mkdir -p "$(dirname 'app/build.gradle')"
+          cat > 'app/build.gradle' <<'QPK_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.qpk.overlay'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.qpk.overlay'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          QPK_EOF
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'QPK_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="QPK"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="floating_ai_panel" />
+                  </service>
+              </application>
+          </manifest>
+          QPK_EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/qpk/overlay/MainActivity.java')"
+          cat > 'app/src/main/java/com/qpk/overlay/MainActivity.java' <<'QPK_EOF'
+          package com.qpk.overlay;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          public class MainActivity extends Activity {
+
+              private TextView status;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  int pad = Math.round(24 * getResources().getDisplayMetrics().density);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setPadding(pad, pad, pad, pad);
+                  root.setBackgroundColor(Color.WHITE);
+
+                  TextView title = new TextView(this);
+                  title.setText("QPK");
+                  title.setTextSize(28);
+                  title.setTextColor(Color.BLACK);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, lp());
+
+                  status = new TextView(this);
+                  status.setTextSize(14);
+                  status.setTextColor(Color.DKGRAY);
+                  status.setGravity(Gravity.CENTER);
+                  status.setPadding(0, pad / 2, 0, pad);
+                  root.addView(status, lp());
+
+                  Button perm = new Button(this);
+                  perm.setText("1. Izinkan overlay");
+                  perm.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { requestOverlayPermission(); }
+                  });
+                  root.addView(perm, lp());
+
+                  Button start = new Button(this);
+                  start.setText("2. Mulai overlay");
+                  start.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { startOverlay(); }
+                  });
+                  root.addView(start, lp());
+
+                  Button stop = new Button(this);
+                  stop.setText("Stop overlay");
+                  stop.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { stopOverlay(); }
+                  });
+                  root.addView(stop, lp());
+
+                  setContentView(root);
+              }
+
+              private ViewGroup.LayoutParams lp() {
+                  return new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  status.setText(Settings.canDrawOverlays(this)
+                          ? "Izin overlay: AKTIF ✅"
+                          : "Izin overlay: BELUM ❌ (tekan tombol 1)");
+              }
+
+              private void requestOverlayPermission() {
+                  if (Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Izin sudah aktif", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  try {
+                      startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:" + getPackageName())));
+                  } catch (Exception e) {
+                      startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+                  }
+              }
+
+              private void startOverlay() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      requestOverlayPermission();
+                      return;
+                  }
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                          != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+                  try {
+                      startForegroundService(new Intent(this, OverlayService.class));
+                      Toast.makeText(this, "Overlay jalan, cari bubble \"AI\"", Toast.LENGTH_SHORT).show();
+                      moveTaskToBack(true);
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Gagal start: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void stopOverlay() {
+                  Intent i = new Intent(this, OverlayService.class);
+                  i.setAction(OverlayService.ACTION_STOP);
+                  try {
+                      startService(i);
+                  } catch (Exception e) {
+                      stopService(new Intent(this, OverlayService.class));
+                  }
+              }
+          }
+          QPK_EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/qpk/overlay/OverlayService.java')"
+          cat > 'app/src/main/java/com/qpk/overlay/OverlayService.java' <<'QPK_EOF'
+          package com.qpk.overlay;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.provider.Settings;
+          import android.util.DisplayMetrics;
+          import android.view.ContextThemeWrapper;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.ViewConfiguration;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          /** Bubble "AI" yang bisa digeser + panel melayang berisi tab WebView. */
+          public class OverlayService extends Service {
+
+              public static final String ACTION_STOP = "com.qpk.overlay.STOP";
+              private static final String CHANNEL_ID = "qpk_overlay";
+              private static final int NOTIF_ID = 1001;
+
+              private static final String[] NAMES = {"Google AI", "ChatGPT", "Gemini", "DeepSeek"};
+              private static final String[] URLS = {
+                      "https://www.google.com/search?udm=50",
+                      "https://chatgpt.com/",
+                      "https://gemini.google.com/app",
+                      "https://chat.deepseek.com/"
+              };
+
+              private WindowManager wm;
+              private Context ui;
+              private TextView bubble;
+              private LinearLayout panel;
+              private FrameLayout webHost;
+              private WindowManager.LayoutParams bubbleLp;
+              private WindowManager.LayoutParams panelLp;
+              private final WebView[] webs = new WebView[NAMES.length];
+              private final Button[] tabButtons = new Button[NAMES.length];
+              private int current = 0;
+              private boolean panelShown = false;
+              private boolean bubbleShown = false;
+              private boolean built = false;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  startForegroundCompat();
+
+                  if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  if (!Settings.canDrawOverlays(this)) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  if (!built) {
+                      try {
+                          buildOverlay();
+                          built = true;
+                      } catch (Throwable t) {
+                          stopSelf();
+                      }
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              private void startForegroundCompat() {
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  nm.createNotificationChannel(new NotificationChannel(
+                          CHANNEL_ID, "QPK overlay", NotificationManager.IMPORTANCE_LOW));
+
+                  Intent stop = new Intent(this, OverlayService.class).setAction(ACTION_STOP);
+                  PendingIntent pi = PendingIntent.getService(this, 0, stop,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  @SuppressWarnings("deprecation")
+                  Notification n = new Notification.Builder(this, CHANNEL_ID)
+                          .setContentTitle("QPK aktif")
+                          .setContentText("Ketuk Stop buat nutup overlay")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setOngoing(true)
+                          .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pi)
+                          .build();
+
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                  } else {
+                      startForeground(NOTIF_ID, n);
+                  }
+              }
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              private void buildOverlay() {
+                  wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                  ui = new ContextThemeWrapper(this, android.R.style.Theme_DeviceDefault_Light);
+                  DisplayMetrics dm = getResources().getDisplayMetrics();
+
+                  // ---------- Bubble ----------
+                  bubble = new TextView(ui);
+                  bubble.setText("AI");
+                  bubble.setTextColor(Color.WHITE);
+                  bubble.setTextSize(16);
+                  bubble.setTypeface(null, Typeface.BOLD);
+                  bubble.setGravity(Gravity.CENTER);
+                  GradientDrawable circle = new GradientDrawable();
+                  circle.setShape(GradientDrawable.OVAL);
+                  circle.setColor(Color.argb(230, 75, 91, 255));
+                  bubble.setBackground(circle);
+
+                  bubbleLp = new WindowManager.LayoutParams(
+                          dp(52), dp(52),
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                          PixelFormat.TRANSLUCENT);
+                  bubbleLp.gravity = Gravity.TOP | Gravity.START;
+                  bubbleLp.x = dp(8);
+                  bubbleLp.y = dm.heightPixels / 3;
+
+                  final int slop = ViewConfiguration.get(this).getScaledTouchSlop();
+                  bubble.setOnTouchListener(new View.OnTouchListener() {
+                      float downX, downY;
+                      int startX, startY;
+                      boolean moved;
+
+                      @Override
+                      public boolean onTouch(View v, MotionEvent e) {
+                          switch (e.getActionMasked()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  downX = e.getRawX();
+                                  downY = e.getRawY();
+                                  startX = bubbleLp.x;
+                                  startY = bubbleLp.y;
+                                  moved = false;
+                                  return true;
+                              case MotionEvent.ACTION_MOVE:
+                                  float dx = e.getRawX() - downX;
+                                  float dy = e.getRawY() - downY;
+                                  if (!moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) moved = true;
+                                  if (moved) {
+                                      bubbleLp.x = startX + (int) dx;
+                                      bubbleLp.y = startY + (int) dy;
+                                      try {
+                                          wm.updateViewLayout(bubble, bubbleLp);
+                                      } catch (Exception ignored) { }
+                                  }
+                                  return true;
+                              case MotionEvent.ACTION_UP:
+                                  if (!moved) togglePanel();
+                                  return true;
+                              default:
+                                  return false;
+                          }
+                      }
+                  });
+
+                  // ---------- Panel ----------
+                  panel = new LinearLayout(ui);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(Color.argb(245, 24, 26, 32));
+                  bg.setCornerRadius(dp(14));
+                  panel.setBackground(bg);
+                  panel.setPadding(dp(6), dp(6), dp(6), dp(6));
+
+                  LinearLayout tabs = new LinearLayout(ui);
+                  tabs.setOrientation(LinearLayout.HORIZONTAL);
+                  for (int i = 0; i < NAMES.length; i++) {
+                      final int idx = i;
+                      Button b = smallButton(NAMES[i]);
+                      b.setOnClickListener(new View.OnClickListener() {
+                          @Override public void onClick(View v) { selectTab(idx); }
+                      });
+                      tabButtons[i] = b;
+                      tabs.addView(b, new LinearLayout.LayoutParams(0, dp(36), 1f));
+                  }
+                  panel.addView(tabs, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                  LinearLayout controls = new LinearLayout(ui);
+                  controls.setOrientation(LinearLayout.HORIZONTAL);
+                  controls.addView(controlButton("◀", new Runnable() {
+                      @Override public void run() {
+                          WebView w = webs[current];
+                          if (w != null && w.canGoBack()) w.goBack();
+                      }
+                  }), new LinearLayout.LayoutParams(0, dp(36), 1f));
+                  controls.addView(controlButton("⟳", new Runnable() {
+                      @Override public void run() {
+                          WebView w = webs[current];
+                          if (w != null) w.reload();
+                      }
+                  }), new LinearLayout.LayoutParams(0, dp(36), 1f));
+                  controls.addView(controlButton("▾", new Runnable() {
+                      @Override public void run() { hidePanel(); }
+                  }), new LinearLayout.LayoutParams(0, dp(36), 1f));
+                  controls.addView(controlButton("✕", new Runnable() {
+                      @Override public void run() { stopSelf(); }
+                  }), new LinearLayout.LayoutParams(0, dp(36), 1f));
+                  panel.addView(controls, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                  webHost = new FrameLayout(ui);
+                  webHost.setBackgroundColor(Color.WHITE);
+                  LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+                  hostLp.topMargin = dp(4);
+                  panel.addView(webHost, hostLp);
+
+                  panelLp = new WindowManager.LayoutParams(
+                          Math.round(dm.widthPixels * 0.94f),
+                          Math.round(dm.heightPixels * 0.60f),
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                          PixelFormat.TRANSLUCENT);
+                  panelLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                  panelLp.y = dp(48);
+                  panelLp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN;
+
+                  wm.addView(bubble, bubbleLp);
+                  bubbleShown = true;
+              }
+
+              private Button smallButton(String text) {
+                  Button b = new Button(ui);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextSize(11);
+                  b.setMinWidth(0);
+                  b.setMinHeight(0);
+                  b.setMinimumWidth(0);
+                  b.setMinimumHeight(0);
+                  b.setPadding(dp(2), 0, dp(2), 0);
+                  b.setTextColor(Color.WHITE);
+                  b.setBackgroundColor(Color.TRANSPARENT);
+                  return b;
+              }
+
+              private Button controlButton(String text, final Runnable action) {
+                  Button b = smallButton(text);
+                  b.setTextSize(16);
+                  b.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { action.run(); }
+                  });
+                  return b;
+              }
+
+              private WebView createWeb() {
+                  WebView w = new WebView(ui);
+                  WebSettings s = w.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setSupportMultipleWindows(false);
+                  // UA tanpa penanda "wv" supaya halaman login lebih jarang nolak WebView
+                  String ua = s.getUserAgentString();
+                  if (ua != null) s.setUserAgentString(ua.replace("; wv", ""));
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(w, true);
+                  w.setWebViewClient(new WebViewClient());
+                  w.setWebChromeClient(new WebChromeClient());
+                  return w;
+              }
+
+              private void selectTab(int i) {
+                  current = i;
+                  WebView w = webs[i];
+                  if (w == null) {
+                      w = createWeb();
+                      webs[i] = w;
+                      w.loadUrl(URLS[i]);
+                  }
+                  webHost.removeAllViews();
+                  if (w.getParent() != null) ((android.view.ViewGroup) w.getParent()).removeView(w);
+                  webHost.addView(w, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  for (int k = 0; k < tabButtons.length; k++) {
+                      tabButtons[k].setBackgroundColor(k == i ? Color.argb(255, 75, 91, 255) : Color.TRANSPARENT);
+                  }
+              }
+
+              private void togglePanel() {
+                  if (panelShown) hidePanel(); else showPanel();
+              }
+
+              private void showPanel() {
+                  if (panelShown) return;
+                  try {
+                      wm.addView(panel, panelLp);
+                      panelShown = true;
+                      if (webHost.getChildCount() == 0) selectTab(current);
+                      else if (webs[current] != null) webs[current].onResume();
+                  } catch (Exception ignored) { }
+              }
+
+              private void hidePanel() {
+                  if (!panelShown) return;
+                  try {
+                      if (webs[current] != null) webs[current].onPause();
+                      wm.removeView(panel);
+                  } catch (Exception ignored) { }
+                  panelShown = false;
+              }
+
+              @Override
+              public void onDestroy() {
+                  try { hidePanel(); } catch (Exception ignored) { }
+                  try {
+                      if (bubbleShown) wm.removeView(bubble);
+                  } catch (Exception ignored) { }
+                  bubbleShown = false;
+                  if (webHost != null) webHost.removeAllViews();
+                  for (int i = 0; i < webs.length; i++) {
+                      if (webs[i] != null) {
+                          try { webs[i].destroy(); } catch (Exception ignored) { }
+                          webs[i] = null;
+                      }
+                  }
+                  super.onDestroy();
+              }
+          }
+          QPK_EOF
+          mkdir -p "$(dirname 'build.gradle')"
+          cat > 'build.gradle' <<'QPK_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          QPK_EOF
+          mkdir -p "$(dirname 'gradle.properties')"
+          cat > 'gradle.properties' <<'QPK_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          QPK_EOF
+          mkdir -p "$(dirname 'settings.gradle')"
+          cat > 'settings.gradle' <<'QPK_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "QPK"
+          include(":app")
+          QPK_EOF
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QPK-apk
+          path: proj/app/build/outputs/apk/debug/*.apk
